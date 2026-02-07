@@ -1,7 +1,8 @@
-openai
-python-dotenv
-pdfplumber
-pypdf
-python-docx
 streamlit
 pandas
+openai
+pdfplumber
+python-docx
+pytesseract
+Pillow
+
