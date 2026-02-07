@@ -1,8 +1,11 @@
 streamlit
 pandas
 openai
-pdfplumber
+pdfplumber==0.11.4
+pdfminer.six==20231228
+pypdf==4.1.0
 python-docx
-pytesseract
+python-dotenv
 Pillow
+
 
