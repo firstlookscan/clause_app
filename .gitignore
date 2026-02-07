@@ -1,6 +1,7 @@
 .env
 outputs/
 outputs_streamlit/
+.streamlit/secrets.toml
 samples/
 __pycache__/
 *.pyc
