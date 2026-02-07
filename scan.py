@@ -2,6 +2,7 @@ import sys
 import json
 import os
 import re
+import csv
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -54,6 +55,26 @@ def dedupe_items(items):
     return out
 
 
+def safe_preview(text: str, n: int = 160) -> str:
+    t = normalize_ws(text)
+    return t[:n] + ("..." if len(t) > n else "")
+
+
+def list_contract_files(path: Path):
+    if path.is_file():
+        return [path]
+
+    if path.is_dir():
+        files = []
+        for ext in ("*.pdf", "*.txt", "*.docx"):
+            files.extend(path.glob(ext))
+        # sort for stable output
+        files = sorted(files, key=lambda p: p.name.lower())
+        return files
+
+    raise SystemExit("Input path not found")
+
+
 # ----------------------------
 # RISK HEURISTICS (V0)
 # ----------------------------
@@ -72,11 +93,9 @@ def score_risk(clause_type, text):
         return "Medium"
 
     if clause_type == "exclusivity":
-        # You can add specific triggers later; keep conservative now
         return "Medium"
 
     if clause_type == "mfn":
-        # Later: detect retroactive, broad scope, etc.
         return "Medium"
 
     if clause_type == "revenue_commitment":
@@ -88,8 +107,7 @@ def score_risk(clause_type, text):
 
 
 # ----------------------------
-# CONFIDENCE (simple + explainable)
-# This is NOT legal certainty; it's "text clarity for this clause type".
+# CONFIDENCE (text clarity; not legal certainty)
 # ----------------------------
 
 def confidence_score(clause_type: str, excerpt: str) -> float:
@@ -108,7 +126,6 @@ def confidence_score(clause_type: str, excerpt: str) -> float:
         if a in t:
             hits += 1
 
-    # Map hits to a conservative confidence score
     if hits >= 3:
         return 0.9
     if hits == 2:
@@ -183,19 +200,30 @@ def extract_text(file_path: Path) -> str:
     if suffix == ".txt":
         return file_path.read_text(errors="ignore")
 
+    if suffix == ".docx":
+        from docx import Document
+        doc = Document(str(file_path))
+        parts = []
+        for p in doc.paragraphs:
+            if p.text and p.text.strip():
+                parts.append(p.text.strip())
+        text = "\n".join(parts).strip()
+        if not text or len(text) < 50:
+            raise ValueError("DOCX did not contain enough text to analyze.")
+        return text
+
     if suffix == ".pdf":
         text = extract_text_from_pdf_pdfplumber(file_path)
         if not text or len(text.strip()) < 50:
             text = extract_text_from_pdf_pypdf(file_path)
 
         if not text or len(text.strip()) < 50:
-            raise SystemExit(
-                "ERROR: Could not extract meaningful text from this PDF.\n"
-                "It may be a scanned image PDF (needs OCR). Try a selectable-text PDF first."
+            raise ValueError(
+                "Could not extract meaningful text (may be a scanned image PDF requiring OCR)."
             )
         return text
 
-    raise SystemExit("Supported inputs: .txt, .pdf")
+    raise ValueError("Supported inputs: .txt, .pdf")
 
 
 # ----------------------------
@@ -246,7 +274,6 @@ CONTRACT TEXT:
     content = resp.choices[0].message.content.strip()
     data = json.loads(content)
 
-    # Safety: keep only valid clause types and non-empty excerpts
     cleaned = []
     for item in data if isinstance(data, list) else []:
         ct = (item.get("clause_type") or "").strip()
@@ -264,11 +291,11 @@ CONTRACT TEXT:
 def build_executive_summary(clause_entries):
     by_type = {t: 0 for t in CLAUSE_TYPES}
     by_risk = {"High": 0, "Medium": 0, "Low": 0}
+
     for c in clause_entries:
         by_type[c["clause_type"]] += 1
         by_risk[c["risk_level"]] += 1
 
-    # Top risks: prioritize High, then Medium
     risk_rank = {"High": 2, "Medium": 1, "Low": 0}
     top = sorted(
         clause_entries,
@@ -276,7 +303,6 @@ def build_executive_summary(clause_entries):
         reverse=True
     )[:5]
 
-    # One-paragraph guidance
     if by_risk["High"] > 0:
         guidance = "Review the High-risk clauses first; these may affect revenue durability, closing conditions, or post-close flexibility."
     elif by_risk["Medium"] > 0:
@@ -293,74 +319,186 @@ def build_executive_summary(clause_entries):
 
 
 # ----------------------------
+# SCAN ONE FILE
+# ----------------------------
+
+def scan_one(file_path: Path):
+    started = datetime.now(timezone.utc)
+    try:
+        text = extract_text(file_path)
+        preview = safe_preview(text)
+        detected = ai_detect_clauses(text)
+
+        clauses = []
+        for item in detected:
+            clause_type = item["clause_type"]
+            excerpt = trim_excerpt(item["excerpt"])
+            risk = score_risk(clause_type, excerpt)
+            explanation = explain(clause_type, risk)
+            conf = confidence_score(clause_type, excerpt)
+
+            clauses.append({
+                "clause_type": clause_type,
+                "risk_level": risk,
+                "confidence": conf,
+                "excerpt": excerpt,
+                "why_this_matters": explanation
+            })
+
+        summary = build_executive_summary(clauses)
+
+        return {
+            "file_name": file_path.name,
+            "file_path": str(file_path),
+            "status": "ok",
+            "preview": preview,
+            "clauses": clauses,
+            "executive_summary": summary,
+            "scanned_at": started.isoformat().replace("+00:00", "Z")
+        }
+
+    except Exception as e:
+        return {
+            "file_name": file_path.name,
+            "file_path": str(file_path),
+            "status": "error",
+            "error": str(e),
+            "scanned_at": started.isoformat().replace("+00:00", "Z")
+        }
+
+
+# ----------------------------
+# BATCH SUMMARY
+# ----------------------------
+
+def build_batch_summary(file_results):
+    total_files = len(file_results)
+    ok_files = [r for r in file_results if r.get("status") == "ok"]
+    error_files = [r for r in file_results if r.get("status") == "error"]
+
+    # Aggregate counts across all files
+    agg_by_type = {t: 0 for t in CLAUSE_TYPES}
+    agg_by_risk = {"High": 0, "Medium": 0, "Low": 0}
+
+    all_clauses_flat = []
+    for r in ok_files:
+        for c in r.get("clauses", []):
+            agg_by_type[c["clause_type"]] += 1
+            agg_by_risk[c["risk_level"]] += 1
+            all_clauses_flat.append({
+                "file_name": r["file_name"],
+                **c
+            })
+
+    # Top risks across the batch
+    risk_rank = {"High": 2, "Medium": 1, "Low": 0}
+    top_batch = sorted(
+        all_clauses_flat,
+        key=lambda x: (risk_rank.get(x["risk_level"], 0), x.get("confidence", 0.0)),
+        reverse=True
+    )[:10]
+
+    guidance = "Start with contracts that have High-risk termination or change-of-control clauses, then review MFN and commitment clauses for pricing/margin implications."
+
+    return {
+        "total_files": total_files,
+        "ok_files": len(ok_files),
+        "error_files": len(error_files),
+        "counts_by_clause_type": agg_by_type,
+        "counts_by_risk_level": agg_by_risk,
+        "top_risks_across_all_contracts": top_batch,
+        "guidance": guidance,
+        "errors": [{"file_name": e["file_name"], "error": e["error"]} for e in error_files]
+    }
+
+
+def write_batch_csv(out_path: Path, file_results):
+    # Flatten to rows: one row per clause
+    rows = []
+    for r in file_results:
+        if r.get("status") != "ok":
+            continue
+        for c in r.get("clauses", []):
+            rows.append({
+                "file_name": r["file_name"],
+                "clause_type": c["clause_type"],
+                "risk_level": c["risk_level"],
+                "confidence": f"{c['confidence']:.2f}",
+                "excerpt": normalize_ws(c["excerpt"]),
+                "why_this_matters": c["why_this_matters"]
+            })
+
+    fieldnames = ["file_name", "clause_type", "risk_level", "confidence", "excerpt", "why_this_matters"]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
+
+
+# ----------------------------
 # MAIN
 # ----------------------------
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python scan.py <file.txt|file.pdf>")
+        print("Usage: python scan.py <file_or_folder>")
+        print("Examples:")
+        print("  python scan.py samples")
+        print("  python scan.py samples\\contract.pdf")
         return
 
-    file_path = Path(sys.argv[1])
-    if not file_path.exists():
-        raise SystemExit("File not found")
-
-    text = extract_text(file_path)
-
-    print("\n[Extraction OK] Preview:")
-    print(text[:200].replace("\n", " ") + ("..." if len(text) > 200 else ""))
-    print()
-
-    detected = ai_detect_clauses(text)
-
-    results = {
-        "metadata": {
-            "file_name": file_path.name,
-            "scanned_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "disclaimer": "This output highlights clauses commonly flagged during M&A diligence and does not constitute legal advice."
-        },
-        "clauses": [],
-        "executive_summary": {}
-    }
-
-    print("=== CLAUSE INTELLIGENCE REPORT (AI) ===\n")
-
-    if not detected:
-        print("No target clauses detected.\n")
-
-    # Build clause entries with risk + explanation + confidence
-    for item in detected:
-        clause_type = item["clause_type"]
-        excerpt_raw = item["excerpt"]
-        excerpt = trim_excerpt(excerpt_raw)
-
-        risk = score_risk(clause_type, excerpt)
-        explanation = explain(clause_type, risk)
-        conf = confidence_score(clause_type, excerpt)
-
-        entry = {
-            "clause_type": clause_type,
-            "risk_level": risk,
-            "confidence": conf,
-            "excerpt": excerpt,
-            "why_this_matters": explanation
-        }
-
-        results["clauses"].append(entry)
-
-        print(f"{clause_type.upper()}:")
-        print(f"  - [{risk} RISK | conf {conf:.2f}] {excerpt}")
-        if explanation:
-            print(f"    → {explanation}")
-        print()
-
-    results["executive_summary"] = build_executive_summary(results["clauses"])
+    input_path = Path(sys.argv[1])
+    files = list_contract_files(input_path)
 
     out_dir = Path("outputs")
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / f"{file_path.stem}_analysis.json"
-    out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print(f"JSON output written to: {out_path}\n")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    # Batch scan
+    print(f"\nScanning {len(files)} file(s)...\n")
+    results = []
+    for i, fp in enumerate(files, start=1):
+        print(f"[{i}/{len(files)}] {fp.name}")
+        res = scan_one(fp)
+        results.append(res)
+
+        if res.get("status") == "ok":
+            s = res["executive_summary"]["counts_by_risk_level"]
+            print(f"   OK | High:{s['High']}  Med:{s['Medium']}  Low:{s['Low']} | preview: {res.get('preview','')}\n")
+        else:
+            print(f"   ERROR | {res.get('error')}\n")
+
+    batch_summary = build_batch_summary(results)
+
+    batch_output = {
+        "metadata": {
+            "input_path": str(input_path),
+            "scanned_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "disclaimer": "This output highlights clauses commonly flagged during M&A diligence and does not constitute legal advice."
+        },
+        "batch_summary": batch_summary,
+        "contracts": results
+    }
+
+    json_path = out_dir / f"batch_{stamp}.json"
+    json_path.write_text(json.dumps(batch_output, indent=2), encoding="utf-8")
+
+    csv_path = out_dir / f"batch_{stamp}.csv"
+    write_batch_csv(csv_path, results)
+
+    # Print an organized “at-a-glance” summary
+    print("\n=== BATCH SUMMARY ===")
+    print(f"Files scanned: {batch_summary['total_files']} (ok: {batch_summary['ok_files']}, errors: {batch_summary['error_files']})")
+    print("Clause counts:", batch_summary["counts_by_clause_type"])
+    print("Risk counts:", batch_summary["counts_by_risk_level"])
+    if batch_summary["top_risks_across_all_contracts"]:
+        print("\nTop risks across all contracts:")
+        for tr in batch_summary["top_risks_across_all_contracts"][:5]:
+            print(f"- {tr['file_name']} | {tr['clause_type']} | {tr['risk_level']} | conf {tr['confidence']:.2f}")
+    print("\nOutputs:")
+    print(f"- JSON: {json_path}")
+    print(f"- CSV:  {csv_path}\n")
 
 
 if __name__ == "__main__":
