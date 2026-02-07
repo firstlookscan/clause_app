@@ -67,8 +67,9 @@ DEFAULT_SCAN = ROOT / "scan.py"
 
 def run_scan_on_folder(input_dir: Path, out_dir: Path, max_files: int, max_pages: int, max_chars: int, strict: bool):
     """Calls scan.py as a subprocess so we reuse all scanning logic."""
+    import sys
     cmd = [
-        "python",
+        sys.executable,
         str(DEFAULT_SCAN),
         str(input_dir),
         "--out",
