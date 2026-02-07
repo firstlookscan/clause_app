@@ -1,4 +1,8 @@
 .env
 outputs/
+outputs_streamlit/
+samples/
 __pycache__/
 *.pyc
+
+
