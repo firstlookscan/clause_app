@@ -10,6 +10,9 @@ import streamlit as st
 from io import BytesIO
 from datetime import datetime
 from docx import Document
+from firstlook_scan.adapters import legacy_batch_output_to_scanresult
+from firstlook_scan.types import ScanResult
+
 
 st.set_page_config(page_title="FirstLook Scan | Deal Triage", layout="wide")
 
@@ -341,6 +344,8 @@ with tab_dashboard:
     # Persist results across Streamlit reruns (e.g., downloads)
     if "batch" not in st.session_state:
         st.session_state["batch"] = None
+    if "scan_result" not in st.session_state:
+        st.session_state["scan_result"] = None
     if "batch_path" not in st.session_state:
         st.session_state["batch_path"] = None
     if "df" not in st.session_state:
@@ -402,6 +407,12 @@ with tab_dashboard:
             latest = find_latest_batch_json(tmp_out)
             if latest and latest.exists():
                 batch = load_batch_json(latest)
+                scan_result = legacy_batch_output_to_scanresult(
+                    batch,
+                    demo_mode=DEMO_MODE,
+                )
+
+                st.session_state["scan_result"] = scan_result
 
                 persist_out = ROOT / "outputs_streamlit"
                 persist_out.mkdir(exist_ok=True)
@@ -489,6 +500,12 @@ with tab_dashboard:
                 latest = find_latest_batch_json(tmp_out)
                 if latest and latest.exists():
                     batch = load_batch_json(latest)
+                    scan_result = legacy_batch_output_to_scanresult(
+                        batch,
+                        demo_mode=DEMO_MODE,
+                    )
+
+                    st.session_state["scan_result"] = scan_result
 
                     persist_out = ROOT / "outputs_streamlit"
                     persist_out.mkdir(exist_ok=True)
@@ -515,6 +532,14 @@ with tab_dashboard:
         if json_file:
             batch = json.loads(json_file.getvalue().decode("utf-8"))
             st.success("Batch JSON loaded.")
+
+            scan_result = legacy_batch_output_to_scanresult(
+                batch,
+                demo_mode=DEMO_MODE,
+            )
+
+            st.session_state["scan_result"] = scan_result
+
 
     if run_stdout or run_stderr:
         with st.expander("Run Logs (from scan.py)"):
@@ -601,11 +626,17 @@ with tab_dashboard:
         st.write("Download structured artifacts for integration, sharing, or review.")
 
         # Batch JSON (in-memory)
-        batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
+        scan_result: ScanResult = st.session_state.get("scan_result")
+
+        if scan_result:
+            batch_bytes = scan_result.model_dump_json(indent=2).encode("utf-8")
+        else:
+            batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
+
         st.download_button(
             "Download batch JSON",
             data=batch_bytes,
-            file_name="batch_output.json",
+            file_name="firstlook_scan_v1.json",
             mime="application/json"
         )
 

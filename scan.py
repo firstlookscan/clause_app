@@ -770,6 +770,47 @@ def main():
 
     if args.demo:
         print("Demo mode complete. Open the HTML report for the best view.")
+  
+
+def scan_path(
+    input_path: Path,
+    *,
+    max_files: int | None = None,
+    max_pages: int | None = 60,
+    max_chars: int = 120000,
+    strict: bool = False,
+) -> dict:
+    """
+    Programmatic API for scanning a directory (or single file path) that returns the same
+    batch output dict your CLI writes to JSON. Streamlit should call this.
+    """
+    graceful = not strict
+
+    # Reuse your existing file discovery
+    files = list_contract_files(input_path, max_files=max_files)
+
+    results = []
+    for fp in files:
+        res = scan_one(fp, max_pages=max_pages, max_chars=max_chars, graceful=graceful)
+        results.append(res)
+
+        # Optional strict mode behavior (mirrors your CLI strict flag intent)
+        if strict and res.get("status") == "needs_ocr":
+            raise RuntimeError("Stopped due to strict mode: OCR-needed PDF encountered.")
+        if strict and res.get("status") == "error":
+            raise RuntimeError(f"Stopped due to strict mode error: {res.get('error')}")
+
+    batch_summary = build_batch_summary(results)
+
+    return {
+        "metadata": {
+            "input_path": str(input_path),
+            "scanned_at": now_utc_z(),
+            "disclaimer": "This output highlights clauses commonly flagged during M&A diligence and does not constitute legal advice.",
+        },
+        "batch_summary": batch_summary,
+        "contracts": results,
+    }
 
 
 if __name__ == "__main__":
