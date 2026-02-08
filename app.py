@@ -7,6 +7,9 @@ import json
 
 import pandas as pd
 import streamlit as st
+from io import BytesIO
+from datetime import datetime
+from docx import Document
 
 st.set_page_config(page_title="FirstLook Scan | Deal Triage", layout="wide")
 
@@ -151,6 +154,89 @@ def worst_risk_per_cell(df: pd.DataFrame) -> pd.DataFrame:
     labeled = labeled[["total_risk_score", "termination", "change_of_control", "mfn", "revenue_commitment", "exclusivity"]]
     return labeled
 
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def make_docx_summary(batch: dict, df: pd.DataFrame) -> bytes:
+    """
+    Generates a simple DOCX summary suitable for emailing/sharing.
+    """
+    batch = batch or {}
+    summary = batch.get("batch_summary", {})
+    doc = Document()
+    doc.add_heading("FirstLook Scan — Deal Triage Summary", level=1)
+
+    doc.add_paragraph(f"Generated: {datetime.utcnow().isoformat()}Z")
+    doc.add_paragraph("Note: This report is informational only and not legal advice.")
+
+    doc.add_heading("Batch Overview", level=2)
+    doc.add_paragraph(f"Files scanned: {summary.get('total_files', 0)}")
+    doc.add_paragraph(f"OK files: {summary.get('ok_files', 0)}")
+    doc.add_paragraph(f"Needs OCR: {summary.get('needs_ocr_files', 0)}")
+    doc.add_paragraph(f"Errors: {summary.get('error_files', 0)}")
+
+    doc.add_heading("Counts by Risk Level", level=2)
+    counts_risk = summary.get("counts_by_risk_level", {})
+    for k in ["High", "Medium", "Low"]:
+        doc.add_paragraph(f"{k}: {counts_risk.get(k, 0)}", style="List Bullet")
+
+    doc.add_heading("Counts by Clause Type", level=2)
+    counts_type = summary.get("counts_by_clause_type", {})
+    for ct, v in counts_type.items():
+        doc.add_paragraph(f"{ct}: {v}", style="List Bullet")
+
+    doc.add_heading("Top Findings (Risk then Confidence)", level=2)
+    if df is None or df.empty:
+        doc.add_paragraph("No findings available.")
+    else:
+        tmp = df.copy()
+        tmp["risk_rank"] = tmp["risk_level"].map({"High": 3, "Medium": 2, "Low": 1}).fillna(0).astype(int)
+        tmp = tmp.sort_values(["risk_rank", "confidence"], ascending=[False, False]).drop(columns=["risk_rank"])
+        top = tmp.head(10)
+
+        table = doc.add_table(rows=1, cols=4)
+        hdr = table.rows[0].cells
+        hdr[0].text = "File"
+        hdr[1].text = "Clause"
+        hdr[2].text = "Risk"
+        hdr[3].text = "Confidence"
+
+        for _, r in top.iterrows():
+            row = table.add_row().cells
+            row[0].text = str(r.get("file_name", ""))
+            row[1].text = str(r.get("clause_type", ""))
+            row[2].text = str(r.get("risk_level", ""))
+            row[3].text = f"{float(r.get('confidence', 0.0)):.2f}"
+
+    bio = BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+
+def find_sibling_outputs(batch_json_path: Path) -> dict:
+    """
+    Finds CSV/HTML files with the same stem as the batch JSON:
+    batch_<stamp>.json -> batch_<stamp>.csv and batch_<stamp>.html
+    """
+    out = {"csv": None, "html": None}
+    if not batch_json_path:
+        return out
+
+    folder = batch_json_path.parent
+    stem = batch_json_path.stem  # e.g. batch_20260207_211439
+
+    csv_path = folder / f"{stem}.csv"
+    html_path = folder / f"{stem}.html"
+
+    if csv_path.exists():
+        out["csv"] = csv_path
+    if html_path.exists():
+        out["html"] = html_path
+
+    return out
+
+
 
 # -----------------------------
 # Docs helpers
@@ -252,13 +338,28 @@ with tab_dashboard:
     # -----------------------------
     # MAIN UI
     # -----------------------------
+    # Persist results across Streamlit reruns (e.g., downloads)
+    if "batch" not in st.session_state:
+        st.session_state["batch"] = None
+    if "batch_path" not in st.session_state:
+        st.session_state["batch_path"] = None
+    if "df" not in st.session_state:
+        st.session_state["df"] = None
+    if "run_stdout" not in st.session_state:
+        st.session_state["run_stdout"] = ""
+    if "run_stderr" not in st.session_state:
+        st.session_state["run_stderr"] = ""
+
     st.title("FirstLook Scan — Deal Triage Dashboard")
     st.caption("Web demo: do not upload confidential documents. Quote-only extraction. Not legal advice.")
 
-    batch = None
-    batch_path = None
-    run_stdout = ""
-    run_stderr = ""
+    # Read current state
+    batch = st.session_state["batch"]
+    batch_path = st.session_state["batch_path"]
+    df = st.session_state["df"]
+    run_stdout = st.session_state["run_stdout"]
+    run_stderr = st.session_state["run_stderr"]
+
 
     # A) Sample deal (recommended for sales)
     c1, c2 = st.columns([1, 3])
@@ -294,6 +395,9 @@ with tab_dashboard:
                     max_chars=max_chars,
                     strict=strict
                 )
+            # Persist logs across Streamlit reruns (e.g., downloads)
+            st.session_state["run_stdout"] = run_stdout
+            st.session_state["run_stderr"] = run_stderr
 
             latest = find_latest_batch_json(tmp_out)
             if latest and latest.exists():
@@ -308,7 +412,14 @@ with tab_dashboard:
                     shutil.copy2(p, dest / p.name)
 
                 batch_path = dest / latest.name
+
+                # Persist across reruns
+                st.session_state["batch"] = batch
+                st.session_state["batch_path"] = batch_path
+                st.session_state["df"] = flatten_clauses(batch)
+
                 st.success("Sample deal scan complete.")
+
             else:
                 st.error("Sample scan ran but no batch JSON was produced. Check logs below.")
 
@@ -371,6 +482,10 @@ with tab_dashboard:
                         strict=strict
                     )
 
+                # Persist logs across Streamlit reruns (e.g., downloads)
+                st.session_state["run_stdout"] = run_stdout
+                st.session_state["run_stderr"] = run_stderr
+
                 latest = find_latest_batch_json(tmp_out)
                 if latest and latest.exists():
                     batch = load_batch_json(latest)
@@ -384,7 +499,14 @@ with tab_dashboard:
                         shutil.copy2(p, dest / p.name)
 
                     batch_path = dest / latest.name
+
+                    # Persist across reruns
+                    st.session_state["batch"] = batch
+                    st.session_state["batch_path"] = batch_path
+                    st.session_state["df"] = flatten_clauses(batch)
+
                     st.success("Scan complete.")
+                
                 else:
                     st.error("Scan ran but no batch JSON was produced. Check logs below.")
 
@@ -470,15 +592,72 @@ with tab_dashboard:
                             st.markdown("---")
 
         st.divider()
+
+    # -----------------------------
+    # OUTPUTS + OCR/ERRORS
+    # -----------------------------
+    if batch:
         st.subheader("Outputs")
-        st.write("Download structured artifacts for integration or review.")
+        st.write("Download structured artifacts for integration, sharing, or review.")
 
+        # Batch JSON (in-memory)
         batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
-        st.download_button("Download batch JSON", data=batch_bytes, file_name="batch_output.json", mime="application/json")
+        st.download_button(
+            "Download batch JSON",
+            data=batch_bytes,
+            file_name="batch_output.json",
+            mime="application/json"
+        )
 
+        # Findings CSV (always available from flattened table)
+        if df is not None and not df.empty:
+            csv_bytes = df_to_csv_bytes(df)
+        else:
+            csv_bytes = "file_name,clause_type,risk_level,confidence,excerpt,why_this_matters\n".encode("utf-8")
+
+        st.download_button(
+            "Download findings CSV (rows =  findings)",
+            data=csv_bytes,
+            file_name="firstlook_findings.csv",
+            mime="text/csv"
+        )
+
+        # Summary DOCX
+        docx_bytes = make_docx_summary(batch, df)
+        st.download_button(
+            "Download summary DOCX",
+            data=docx_bytes,
+            file_name="firstlook_summary.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+        # Optional: exact scan.py artifacts (only when scan ran inside the app)
+        if batch_path:
+            siblings = find_sibling_outputs(batch_path)
+
+            cA, cB = st.columns(2)
+            with cA:
+                if siblings["csv"]:
+                    st.download_button(
+                        "Download Raw Batch CSV (scan.py output)",
+                        data=siblings["csv"].read_bytes(),
+                        file_name=siblings["csv"].name,
+                        mime="text/csv"
+                    )
+            with cB:
+                if siblings["html"]:
+                    st.download_button(
+                        "Download HTML report (scan.py output)",
+                        data=siblings["html"].read_bytes(),
+                        file_name=siblings["html"].name,
+                        mime="text/html"
+                    )
+
+        # Show folder location (local only; Streamlit Cloud paths are not useful)
         if batch_path:
             st.info(f"Latest run outputs folder: {batch_path.parent}")
 
+        # Show OCR-needed/errors (from batch summary)
         if summary.get("needs_ocr"):
             st.warning("Some PDFs appear scanned and need OCR:")
             st.write(summary["needs_ocr"])
@@ -487,4 +666,5 @@ with tab_dashboard:
             st.error("Errors:")
             st.write(summary["errors"])
     else:
-        st.info("Use **Load Sample Deal** for the fastest demo, or upload a few non-confidential files and click **Run Scan**.")
+        st.info("Run a scan (Load Sample Deal or Upload & Scan) to enable downloads and triage outputs.")
+
