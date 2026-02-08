@@ -12,6 +12,11 @@ from datetime import datetime
 from docx import Document
 from firstlook_scan.adapters import legacy_batch_output_to_scanresult
 from firstlook_scan.types import ScanResult
+from firstlook_scan.export import (
+    export_scanresult_json_bytes,
+    export_findings_csv_bytes,
+    export_summary_docx_bytes,
+)
 
 
 st.set_page_config(page_title="FirstLook Scan | Deal Triage", layout="wide")
@@ -625,11 +630,11 @@ with tab_dashboard:
         st.subheader("Outputs")
         st.write("Download structured artifacts for integration, sharing, or review.")
 
-        # Batch JSON (in-memory)
-        scan_result: ScanResult = st.session_state.get("scan_result")
+        # Batch JSON (canonical schema)
+        scan_result = st.session_state.get("scan_result")
 
         if scan_result:
-            batch_bytes = scan_result.model_dump_json(indent=2).encode("utf-8")
+            batch_bytes = export_scanresult_json_bytes(scan_result)
         else:
             batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
 
@@ -640,21 +645,31 @@ with tab_dashboard:
             mime="application/json"
         )
 
-        # Findings CSV (always available from flattened table)
-        if df is not None and not df.empty:
+        # Findings CSV (canonical)
+        scan_result = st.session_state.get("scan_result")
+
+        if scan_result:
+            csv_bytes = export_findings_csv_bytes(scan_result)
+        elif df is not None and not df.empty:
             csv_bytes = df_to_csv_bytes(df)
         else:
             csv_bytes = "file_name,clause_type,risk_level,confidence,excerpt,why_this_matters\n".encode("utf-8")
 
         st.download_button(
-            "Download findings CSV (rows =  findings)",
+            "Download findings CSV (rows = findings)",
             data=csv_bytes,
             file_name="firstlook_findings.csv",
             mime="text/csv"
         )
 
-        # Summary DOCX
-        docx_bytes = make_docx_summary(batch, df)
+        # Summary DOCX (canonical)
+        scan_result = st.session_state.get("scan_result")
+
+        if scan_result:
+            docx_bytes = export_summary_docx_bytes(scan_result)
+        else:
+            docx_bytes = make_docx_summary(batch, df)
+
         st.download_button(
             "Download summary DOCX",
             data=docx_bytes,
