@@ -59,8 +59,6 @@ def require_access_code():
     st.stop()
 
 
-require_access_code()
-
 ROOT = Path(__file__).parent
 DEFAULT_SCAN = ROOT / "scan.py"
 
@@ -155,158 +153,141 @@ def worst_risk_per_cell(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -----------------------------
-# SIDEBAR
+# Docs helpers
 # -----------------------------
-st.sidebar.title("Deal Triage Controls")
+def read_md(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"⚠️ Not found: `{path}`"
+    except Exception as e:
+        return f"⚠️ Could not read `{path}`: {e}"
 
-if DEMO_MODE:
-    mode = "Upload & Scan"  # demo keeps it simple
-    max_files = DEMO_LIMITS["max_files"]
-    max_pages = DEMO_LIMITS["max_pages"]
-    max_chars = DEMO_LIMITS["max_chars"]
-    min_conf = DEMO_LIMITS["min_confidence_floor"]
 
-    st.sidebar.info(
-        f"Demo limits:\n"
-        f"- max files: {max_files}\n"
-        f"- max pages: {max_pages}\n"
-        f"- max chars: {max_chars}\n"
-        f"- scans/session: {DEMO_LIMITS['max_scans_per_session']}\n"
-        f"- min confidence: {min_conf}"
+def render_docs_section(root: Path):
+    st.subheader("Documentation")
+    st.caption("These docs are loaded directly from the repo (README.md at root, plus /docs guides).")
+
+    readme_path = root / "README.md"
+    sales_path = root / "docs" / "sales-demo-guide.md"
+    admin_path = root / "docs" / "admin-operator-guide.md"
+
+    doc_choice = st.selectbox(
+        "Choose a document",
+        ["README", "Sales Demo Guide", "Admin / Operator Guide"],
+        index=0,
     )
-else:
-    mode = st.sidebar.radio("Mode", ["Upload & Scan", "Load Existing Batch JSON"], index=0)
-    max_files = st.sidebar.slider("Max files (safety)", 1, 200, 25, 1)
-    max_pages = st.sidebar.slider("Max PDF pages per doc (safety)", 5, 200, 60, 5)
-    max_chars = st.sidebar.slider("Max characters sent to AI per doc (safety)", 20000, 250000, 120000, 10000)
-    min_conf = st.sidebar.slider("Minimum confidence", 0.0, 1.0, 0.5, 0.05)
 
-strict = st.sidebar.checkbox("Strict mode (stop on OCR/errors)", value=False)
+    if doc_choice == "README":
+        content = read_md(readme_path)
+        filename = "README.md"
+    elif doc_choice == "Sales Demo Guide":
+        content = read_md(sales_path)
+        filename = "sales-demo-guide.md"
+    else:
+        content = read_md(admin_path)
+        filename = "admin-operator-guide.md"
 
-st.sidebar.divider()
-risk_filter = st.sidebar.multiselect("Risk levels", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
-clause_filter = st.sidebar.multiselect(
-    "Clause types",
-    ["change_of_control", "termination", "exclusivity", "mfn", "revenue_commitment"],
-    default=["change_of_control", "termination", "exclusivity", "mfn", "revenue_commitment"]
-)
-st.sidebar.caption("Tip: For deal triage, start with High risk + confidence ≥ 0.75.")
+    st.markdown(content)
+    st.download_button(
+        "Download this doc",
+        data=content.encode("utf-8"),
+        file_name=filename,
+        mime="text/markdown",
+    )
+
 
 # -----------------------------
-# MAIN UI
+# Access gate
 # -----------------------------
-st.title("FirstLook Scan — Deal Triage Dashboard")
-st.caption("Web demo: do not upload confidential documents. Quote-only extraction. Not legal advice.")
+require_access_code()
 
-batch = None
-batch_path = None
-run_stdout = ""
-run_stderr = ""
+# -----------------------------
+# Tabs
+# -----------------------------
+tab_dashboard, tab_docs = st.tabs(["Dashboard", "Docs"])
 
-# A) Sample deal (recommended for sales)
-c1, c2 = st.columns([1, 3])
-with c1:
-    load_sample = st.button("Load Sample Deal (Recommended)")
-with c2:
-    st.write("")
+with tab_docs:
+    render_docs_section(ROOT)
 
-if load_sample:
-    demo_dir = ROOT / "demo_data"
-    if not demo_dir.exists():
-        st.error("demo_data/ folder not found. Create it at the repo root and add demo contracts.")
-        st.stop()
+with tab_dashboard:
+    # -----------------------------
+    # SIDEBAR
+    # -----------------------------
+    st.sidebar.title("Deal Triage Controls")
 
-    # scan budget per session
     if DEMO_MODE:
-        scans = st.session_state.get("scan_count", 0)
-        if scans >= DEMO_LIMITS["max_scans_per_session"]:
-            st.error("Demo scan limit reached for this session. Please refresh later.")
-            st.stop()
-        st.session_state["scan_count"] = scans + 1
+        mode = "Upload & Scan"  # demo keeps it simple
+        max_files = DEMO_LIMITS["max_files"]
+        max_pages = DEMO_LIMITS["max_pages"]
+        max_chars = DEMO_LIMITS["max_chars"]
+        min_conf = DEMO_LIMITS["min_confidence_floor"]
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp_out = Path(td) / "outputs"
-        tmp_out.mkdir(parents=True, exist_ok=True)
+        st.sidebar.info(
+            f"Demo limits:\n"
+            f"- max files: {max_files}\n"
+            f"- max pages: {max_pages}\n"
+            f"- max chars: {max_chars}\n"
+            f"- scans/session: {DEMO_LIMITS['max_scans_per_session']}\n"
+            f"- min confidence: {min_conf}"
+        )
+    else:
+        mode = st.sidebar.radio("Mode", ["Upload & Scan", "Load Existing Batch JSON"], index=0)
+        max_files = st.sidebar.slider("Max files (safety)", 1, 200, 25, 1)
+        max_pages = st.sidebar.slider("Max PDF pages per doc (safety)", 5, 200, 60, 5)
+        max_chars = st.sidebar.slider("Max characters sent to AI per doc (safety)", 20000, 250000, 120000, 10000)
+        min_conf = st.sidebar.slider("Minimum confidence", 0.0, 1.0, 0.5, 0.05)
 
-        with st.spinner("Scanning sample deal..."):
-            code, run_stdout, run_stderr = run_scan_on_folder(
-                input_dir=demo_dir,
-                out_dir=tmp_out,
-                max_files=max_files,
-                max_pages=max_pages,
-                max_chars=max_chars,
-                strict=strict
-            )
+    strict = st.sidebar.checkbox("Strict mode (stop on OCR/errors)", value=False)
 
-        latest = find_latest_batch_json(tmp_out)
-        if latest and latest.exists():
-            batch = load_batch_json(latest)
-
-            persist_out = ROOT / "outputs_streamlit"
-            persist_out.mkdir(exist_ok=True)
-            stamp = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-            dest = persist_out / f"run_{stamp}"
-            dest.mkdir(parents=True, exist_ok=True)
-            for p in tmp_out.glob("*"):
-                shutil.copy2(p, dest / p.name)
-
-            batch_path = dest / latest.name
-            st.success("Sample deal scan complete.")
-        else:
-            st.error("Sample scan ran but no batch JSON was produced. Check logs below.")
-
-# B) Upload & scan
-if mode == "Upload & Scan":
-    uploaded = st.file_uploader(
-        "Upload contract files (.pdf, .docx, .txt).",
-        type=["pdf", "docx", "txt"],
-        accept_multiple_files=True
+    st.sidebar.divider()
+    risk_filter = st.sidebar.multiselect("Risk levels", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
+    clause_filter = st.sidebar.multiselect(
+        "Clause types",
+        ["change_of_control", "termination", "exclusivity", "mfn", "revenue_commitment"],
+        default=["change_of_control", "termination", "exclusivity", "mfn", "revenue_commitment"]
     )
+    st.sidebar.caption("Tip: For deal triage, start with High risk + confidence ≥ 0.75.")
 
-    if DEMO_MODE and uploaded:
-        if len(uploaded) > DEMO_LIMITS["max_files"]:
-            st.warning(f"Demo limit: only the first {DEMO_LIMITS['max_files']} files will be scanned.")
-            uploaded = uploaded[:DEMO_LIMITS["max_files"]]
+    # -----------------------------
+    # MAIN UI
+    # -----------------------------
+    st.title("FirstLook Scan — Deal Triage Dashboard")
+    st.caption("Web demo: do not upload confidential documents. Quote-only extraction. Not legal advice.")
 
-        too_big = []
-        for f in uploaded:
-            size_mb = len(f.getbuffer()) / (1024 * 1024)
-            if size_mb > DEMO_LIMITS["max_file_mb"]:
-                too_big.append((f.name, size_mb))
-        if too_big:
-            st.error("One or more files exceed the demo size limit:")
-            for name, mb in too_big:
-                st.write(f"- {name}: {mb:.1f} MB (limit {DEMO_LIMITS['max_file_mb']} MB)")
-            st.stop()
+    batch = None
+    batch_path = None
+    run_stdout = ""
+    run_stderr = ""
 
-    colA, colB = st.columns([1, 1])
-    with colA:
-        run_now = st.button("Run Scan", type="primary", disabled=(not uploaded))
-    with colB:
+    # A) Sample deal (recommended for sales)
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        load_sample = st.button("Load Sample Deal (Recommended)")
+    with c2:
         st.write("")
 
-    if run_now and uploaded:
+    if load_sample:
+        demo_dir = ROOT / "demo_data"
+        if not demo_dir.exists():
+            st.error("demo_data/ folder not found. Create it at the repo root and add demo contracts.")
+            st.stop()
+
         # scan budget per session
         if DEMO_MODE:
             scans = st.session_state.get("scan_count", 0)
             if scans >= DEMO_LIMITS["max_scans_per_session"]:
-                st.error("Demo scan limit reached for this session. Please refresh later or use the sample deal.")
+                st.error("Demo scan limit reached for this session. Please refresh later.")
                 st.stop()
             st.session_state["scan_count"] = scans + 1
 
         with tempfile.TemporaryDirectory() as td:
-            tmp_in = Path(td) / "inputs"
             tmp_out = Path(td) / "outputs"
-            tmp_in.mkdir(parents=True, exist_ok=True)
             tmp_out.mkdir(parents=True, exist_ok=True)
 
-            for f in uploaded:
-                out_file = tmp_in / f.name
-                out_file.write_bytes(f.getbuffer())
-
-            with st.spinner("Scanning contracts..."):
+            with st.spinner("Scanning sample deal..."):
                 code, run_stdout, run_stderr = run_scan_on_folder(
-                    input_dir=tmp_in,
+                    input_dir=demo_dir,
                     out_dir=tmp_out,
                     max_files=max_files,
                     max_pages=max_pages,
@@ -327,107 +308,183 @@ if mode == "Upload & Scan":
                     shutil.copy2(p, dest / p.name)
 
                 batch_path = dest / latest.name
-                st.success("Scan complete.")
+                st.success("Sample deal scan complete.")
             else:
-                st.error("Scan ran but no batch JSON was produced. Check logs below.")
+                st.error("Sample scan ran but no batch JSON was produced. Check logs below.")
 
-if not DEMO_MODE and mode == "Load Existing Batch JSON":
-    json_file = st.file_uploader("Upload a batch_*.json file (from outputs)", type=["json"], accept_multiple_files=False)
-    if json_file:
-        batch = json.loads(json_file.getvalue().decode("utf-8"))
-        st.success("Batch JSON loaded.")
+    # B) Upload & scan
+    if mode == "Upload & Scan":
+        uploaded = st.file_uploader(
+            "Upload contract files (.pdf, .docx, .txt).",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True
+        )
 
-if run_stdout or run_stderr:
-    with st.expander("Run Logs (from scan.py)"):
-        st.code(run_stdout or "", language="text")
-        if run_stderr:
-            st.code(run_stderr, language="text")
+        if DEMO_MODE and uploaded:
+            if len(uploaded) > DEMO_LIMITS["max_files"]:
+                st.warning(f"Demo limit: only the first {DEMO_LIMITS['max_files']} files will be scanned.")
+                uploaded = uploaded[:DEMO_LIMITS["max_files"]]
 
-# -----------------------------
-# DASHBOARD VIEW
-# -----------------------------
-if batch:
-    summary = batch.get("batch_summary", {})
-    df = flatten_clauses(batch)
+            too_big = []
+            for f in uploaded:
+                size_mb = len(f.getbuffer()) / (1024 * 1024)
+                if size_mb > DEMO_LIMITS["max_file_mb"]:
+                    too_big.append((f.name, size_mb))
+            if too_big:
+                st.error("One or more files exceed the demo size limit:")
+                for name, mb in too_big:
+                    st.write(f"- {name}: {mb:.1f} MB (limit {DEMO_LIMITS['max_file_mb']} MB)")
+                st.stop()
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Files scanned", summary.get("total_files", 0))
-    k2.metric("OK files", summary.get("ok_files", 0))
-    k3.metric("Needs OCR", summary.get("needs_ocr_files", 0))
-    k4.metric("Errors", summary.get("error_files", 0))
+        colA, colB = st.columns([1, 1])
+        with colA:
+            run_now = st.button("Run Scan", type="primary", disabled=(not uploaded))
+        with colB:
+            st.write("")
 
-    st.write("")
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        st.subheader("Counts by Risk")
-        risk_counts = summary.get("counts_by_risk_level", {})
-        risk_df = pd.DataFrame([risk_counts]).T.reset_index()
-        risk_df.columns = ["risk_level", "count"]
-        st.bar_chart(risk_df.set_index("risk_level")["count"])
-    with c2:
-        st.subheader("Counts by Clause Type")
-        type_counts = summary.get("counts_by_clause_type", {})
-        type_df = pd.DataFrame([type_counts]).T.reset_index()
-        type_df.columns = ["clause_type", "count"]
-        st.bar_chart(type_df.set_index("clause_type")["count"])
+        if run_now and uploaded:
+            # scan budget per session
+            if DEMO_MODE:
+                scans = st.session_state.get("scan_count", 0)
+                if scans >= DEMO_LIMITS["max_scans_per_session"]:
+                    st.error("Demo scan limit reached for this session. Please refresh later or use the sample deal.")
+                    st.stop()
+                st.session_state["scan_count"] = scans + 1
 
-    st.divider()
+            with tempfile.TemporaryDirectory() as td:
+                tmp_in = Path(td) / "inputs"
+                tmp_out = Path(td) / "outputs"
+                tmp_in.mkdir(parents=True, exist_ok=True)
+                tmp_out.mkdir(parents=True, exist_ok=True)
 
-    if df.empty:
-        st.warning("No clauses found in the batch (or everything failed/OCR-needed).")
-    else:
-        df_f = df.copy()
-        df_f = df_f[df_f["confidence"] >= min_conf]
-        df_f = df_f[df_f["risk_level"].isin(risk_filter)]
-        df_f = df_f[df_f["clause_type"].isin(clause_filter)]
+                for f in uploaded:
+                    out_file = tmp_in / f.name
+                    out_file.write_bytes(f.getbuffer())
 
-        df_f["risk_rank"] = df_f["risk_level"].apply(risk_rank)
-        df_f = df_f.sort_values(by=["risk_rank", "confidence"], ascending=[False, False]).drop(columns=["risk_rank"])
+                with st.spinner("Scanning contracts..."):
+                    code, run_stdout, run_stderr = run_scan_on_folder(
+                        input_dir=tmp_in,
+                        out_dir=tmp_out,
+                        max_files=max_files,
+                        max_pages=max_pages,
+                        max_chars=max_chars,
+                        strict=strict
+                    )
 
-        st.subheader("Contract Risk Heatmap (Worst Risk by Clause Type)")
-        st.caption("Each cell shows the worst risk detected for that clause type in that contract. Sorted by total risk score.")
+                latest = find_latest_batch_json(tmp_out)
+                if latest and latest.exists():
+                    batch = load_batch_json(latest)
 
-        heat = worst_risk_per_cell(df_f)
-        if heat.empty:
-            st.write("No data under current filters.")
-        else:
-            st.dataframe(heat, use_container_width=True, height=320)
+                    persist_out = ROOT / "outputs_streamlit"
+                    persist_out.mkdir(exist_ok=True)
+                    stamp = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+                    dest = persist_out / f"run_{stamp}"
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for p in tmp_out.glob("*"):
+                        shutil.copy2(p, dest / p.name)
 
-        st.subheader("Top Risks (Deal Triage)")
-        st.caption("Sorted by risk level then confidence.")
-        st.dataframe(df_f[["file_name", "clause_type", "risk_level", "confidence"]], use_container_width=True, height=260)
+                    batch_path = dest / latest.name
+                    st.success("Scan complete.")
+                else:
+                    st.error("Scan ran but no batch JSON was produced. Check logs below.")
+
+    if not DEMO_MODE and mode == "Load Existing Batch JSON":
+        json_file = st.file_uploader("Upload a batch_*.json file (from outputs)", type=["json"], accept_multiple_files=False)
+        if json_file:
+            batch = json.loads(json_file.getvalue().decode("utf-8"))
+            st.success("Batch JSON loaded.")
+
+    if run_stdout or run_stderr:
+        with st.expander("Run Logs (from scan.py)"):
+            st.code(run_stdout or "", language="text")
+            if run_stderr:
+                st.code(run_stderr, language="text")
+
+    # -----------------------------
+    # DASHBOARD VIEW
+    # -----------------------------
+    if batch:
+        summary = batch.get("batch_summary", {})
+        df = flatten_clauses(batch)
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Files scanned", summary.get("total_files", 0))
+        k2.metric("OK files", summary.get("ok_files", 0))
+        k3.metric("Needs OCR", summary.get("needs_ocr_files", 0))
+        k4.metric("Errors", summary.get("error_files", 0))
 
         st.write("")
-        st.subheader("Issue-First Drilldown")
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.subheader("Counts by Risk")
+            risk_counts = summary.get("counts_by_risk_level", {})
+            risk_df = pd.DataFrame([risk_counts]).T.reset_index()
+            risk_df.columns = ["risk_level", "count"]
+            st.bar_chart(risk_df.set_index("risk_level")["count"])
+        with c2:
+            st.subheader("Counts by Clause Type")
+            type_counts = summary.get("counts_by_clause_type", {})
+            type_df = pd.DataFrame([type_counts]).T.reset_index()
+            type_df.columns = ["clause_type", "count"]
+            st.bar_chart(type_df.set_index("clause_type")["count"])
 
-        for ct in ["termination", "change_of_control", "mfn", "revenue_commitment", "exclusivity"]:
-            block = df_f[df_f["clause_type"] == ct]
-            with st.expander(f"{ct} ({len(block)} findings)", expanded=(ct in ["termination", "change_of_control"])):
-                if block.empty:
-                    st.write("No findings under current filters.")
-                else:
-                    for _, row in block.iterrows():
-                        st.markdown(f"**{row['file_name']}** — **{row['risk_level']}** (confidence {row['confidence']:.2f})")
-                        st.markdown(f"- **Why it matters:** {row['why_this_matters']}")
-                        st.code(row["excerpt"], language="text")
-                        st.markdown("---")
+        st.divider()
 
-    st.divider()
-    st.subheader("Outputs")
-    st.write("Download structured artifacts for integration or review.")
+        if df.empty:
+            st.warning("No clauses found in the batch (or everything failed/OCR-needed).")
+        else:
+            df_f = df.copy()
+            df_f = df_f[df_f["confidence"] >= min_conf]
+            df_f = df_f[df_f["risk_level"].isin(risk_filter)]
+            df_f = df_f[df_f["clause_type"].isin(clause_filter)]
 
-    batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
-    st.download_button("Download batch JSON", data=batch_bytes, file_name="batch_output.json", mime="application/json")
+            df_f["risk_rank"] = df_f["risk_level"].apply(risk_rank)
+            df_f = df_f.sort_values(by=["risk_rank", "confidence"], ascending=[False, False]).drop(columns=["risk_rank"])
 
-    if batch_path:
-        st.info(f"Latest run outputs folder: {batch_path.parent}")
+            st.subheader("Contract Risk Heatmap (Worst Risk by Clause Type)")
+            st.caption("Each cell shows the worst risk detected for that clause type in that contract. Sorted by total risk score.")
 
-    if summary.get("needs_ocr"):
-        st.warning("Some PDFs appear scanned and need OCR:")
-        st.write(summary["needs_ocr"])
+            heat = worst_risk_per_cell(df_f)
+            if heat.empty:
+                st.write("No data under current filters.")
+            else:
+                st.dataframe(heat, use_container_width=True, height=320)
 
-    if summary.get("errors"):
-        st.error("Errors:")
-        st.write(summary["errors"])
-else:
-    st.info("Use **Load Sample Deal** for the fastest demo, or upload a few non-confidential files and click **Run Scan**.")
+            st.subheader("Top Risks (Deal Triage)")
+            st.caption("Sorted by risk level then confidence.")
+            st.dataframe(df_f[["file_name", "clause_type", "risk_level", "confidence"]], use_container_width=True, height=260)
+
+            st.write("")
+            st.subheader("Issue-First Drilldown")
+
+            for ct in ["termination", "change_of_control", "mfn", "revenue_commitment", "exclusivity"]:
+                block = df_f[df_f["clause_type"] == ct]
+                with st.expander(f"{ct} ({len(block)} findings)", expanded=(ct in ["termination", "change_of_control"])):
+                    if block.empty:
+                        st.write("No findings under current filters.")
+                    else:
+                        for _, row in block.iterrows():
+                            st.markdown(f"**{row['file_name']}** — **{row['risk_level']}** (confidence {row['confidence']:.2f})")
+                            st.markdown(f"- **Why it matters:** {row['why_this_matters']}")
+                            st.code(row["excerpt"], language="text")
+                            st.markdown("---")
+
+        st.divider()
+        st.subheader("Outputs")
+        st.write("Download structured artifacts for integration or review.")
+
+        batch_bytes = json.dumps(batch, indent=2).encode("utf-8")
+        st.download_button("Download batch JSON", data=batch_bytes, file_name="batch_output.json", mime="application/json")
+
+        if batch_path:
+            st.info(f"Latest run outputs folder: {batch_path.parent}")
+
+        if summary.get("needs_ocr"):
+            st.warning("Some PDFs appear scanned and need OCR:")
+            st.write(summary["needs_ocr"])
+
+        if summary.get("errors"):
+            st.error("Errors:")
+            st.write(summary["errors"])
+    else:
+        st.info("Use **Load Sample Deal** for the fastest demo, or upload a few non-confidential files and click **Run Scan**.")
